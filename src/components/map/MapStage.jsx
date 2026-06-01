@@ -1,14 +1,16 @@
 /**
  * MapStage.jsx
  *
- * Purpose:  Renders all Philippine province polygons inside a pannable,
- *           zoomable Pixi Container. Handles hover highlight and click
- *           selection per province.
+ * Purpose:  Renders all Philippine province polygons and province name labels
+ *           inside a pannable, zoomable Pixi Container. Handles hover
+ *           highlight and click selection per province.
  *
  * Pan:      Native DOM pointerdown/move/up forwarded via refs from GameCanvas.
  * Zoom:     Native DOM wheel event forwarded via ref from GameCanvas.
  * Hover:    Hit-tested on pointermove using ray-casting against projected rings.
  * Select:   Fires on pointerup if pointer did not drag.
+ * Labels:   Province names rendered as Pixi Text at centroid, visible only
+ *           above LABEL_MIN_SCALE zoom threshold to avoid clutter.
  *
  * Projection: Equirectangular — maps lon/lat linearly to canvas pixels.
  *             Sufficient for Philippines (narrow lat range, no polar distortion).
@@ -16,8 +18,9 @@
  * Dependencies: @pixi/react v7, pixi.js v7, React, useMapStore
  */
 
-import { Container, Graphics } from '@pixi/react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Container, Graphics, Text } from '@pixi/react'
+import * as PIXI from 'pixi.js'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import useMapStore from '../../stores/useMapStore'
 
 // ── Color constants ───────────────────────────────────────────────────────────
@@ -28,9 +31,14 @@ const COLOR_BORDER   = 0x8B7355   // Province borders — parchment brown
 const COLOR_SEA      = 0x1A2E3A   // Sea/background — deep navy
 
 // ── Zoom limits ───────────────────────────────────────────────────────────────
-const MIN_SCALE = 0.5
-const MAX_SCALE = 8.0
-const ZOOM_STEP = 0.1   // Scale multiplier per scroll tick
+const MIN_SCALE      = 0.5
+const MAX_SCALE      = 8.0
+const ZOOM_STEP      = 0.1        // Scale multiplier per scroll tick
+
+// ── Label visibility threshold ────────────────────────────────────────────────
+// Labels only appear at this zoom level and above to avoid overlap at low zoom.
+// Tune this value based on how crowded labels look in practice.
+const LABEL_MIN_SCALE = 1.8
 
 // ── Pure utility functions ────────────────────────────────────────────────────
 
@@ -122,6 +130,57 @@ function pointInRing(px, py, ring, project) {
   return inside
 }
 
+/**
+ * Compute the visual centroid of a GeoJSON feature by averaging all
+ * coordinate points across all polygons and rings.
+ *
+ * This is a simple arithmetic mean — not a true polygon centroid — but
+ * it's fast and close enough for label placement on provinces.
+ * For highly concave or multi-island provinces the label may fall in water;
+ * this is acceptable for the current scope.
+ *
+ * @param {object}   feature - GeoJSON Feature (Polygon or MultiPolygon)
+ * @param {Function} project - Projection function (lon, lat) => [x, y]
+ * @returns {{ x: number, y: number }} Projected centroid in canvas space
+ */
+function computeCentroid(feature, project) {
+  const geom     = feature.geometry
+  const polygons = geom.type === 'MultiPolygon'
+    ? geom.coordinates
+    : [geom.coordinates]
+
+  let sumX = 0
+  let sumY = 0
+  let count = 0
+
+  polygons.forEach((polygon) => {
+    // Only use outer ring (index 0) — ignore holes
+    const ring = polygon[0]
+    ring.forEach(([lon, lat]) => {
+      const [x, y] = project(lon, lat)
+      sumX += x
+      sumY += y
+      count++
+    })
+  })
+
+  return { x: sumX / count, y: sumY / count }
+}
+
+// ── Shared PIXI.TextStyle ─────────────────────────────────────────────────────
+// Defined outside component to avoid recreating the object on every render.
+// Font size is in local Pixi units (before viewport scale is applied).
+// At LABEL_MIN_SCALE 1.8, an 8px font appears as ~14px on screen — readable.
+const LABEL_STYLE = new PIXI.TextStyle({
+  fontFamily: 'Georgia, serif',
+  fontSize: 8,
+  fill: '#FFFFFF',
+  stroke: '#000000',
+  strokeThickness: 2,   // Black outline ensures readability on any fill color
+  align: 'center',
+  letterSpacing: 0.5,
+})
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function MapStage({
@@ -165,6 +224,22 @@ export default function MapStage({
     const bounds  = computeBounds(geojson.features)
     const project = buildProjection(bounds, width, height)
     projectionRef.current = { bounds, project }
+  }, [geojson, width, height])
+
+  // ── Label centroids — computed once per geojson load ─────────────────────
+  // Memoized separately from draw so labels don't recompute on every hover.
+  // Returns array of { x, y, name } parallel to geojson.features.
+  const labelData = useMemo(() => {
+    if (!geojson || !projectionRef.current) return []
+    const { project } = projectionRef.current
+
+    return geojson.features.map((feature) => {
+      const centroid = computeCentroid(feature, project)
+      const name     = feature.properties.NAME_1 ?? ''
+      return { x: centroid.x, y: centroid.y, name }
+    })
+  // projectionRef.current is a ref — not reactive. Depend on geojson + size.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [geojson, width, height])
 
   // ── Province draw function ────────────────────────────────────────────────
@@ -215,6 +290,11 @@ export default function MapStage({
     })
   }, [geojson, width, height, hoveredIndex, selectedIndex])
 
+  // ── Determine if labels should be visible at current zoom ─────────────────
+  // Labels are hidden below LABEL_MIN_SCALE to prevent overlapping text
+  // when many provinces are visible at once.
+  const showLabels = viewport.scale >= LABEL_MIN_SCALE
+
   // ── Input handlers (use clientX/Y — native DOM events) ───────────────────
 
   /**
@@ -256,8 +336,8 @@ export default function MapStage({
 
     const v = viewportRef.current
 
-    // Convert screen coordinates to local container space
-    // Must undo the container's pan (x, y) and zoom (scale)
+    // Convert screen coordinates to local container space.
+    // Must undo the container's pan (x, y) and zoom (scale).
     const localX = (e.clientX - v.x) / v.scale
     const localY = (e.clientY - v.y) / v.scale
 
@@ -331,13 +411,37 @@ export default function MapStage({
         }}
       />
 
-      {/* Pannable / zoomable container — all province graphics live here */}
+      {/* Pannable / zoomable container — all province graphics and labels */}
       <Container
         x={viewport.x}
         y={viewport.y}
         scale={viewport.scale}
       >
+        {/* Province polygon fills and borders */}
         <Graphics draw={draw} />
+
+        {/*
+          Province name labels.
+          Rendered as individual Pixi Text nodes, one per province.
+          Hidden below LABEL_MIN_SCALE to avoid overlapping at low zoom.
+          anchor={[0.5, 0.5]} centers the label on the computed centroid.
+          scale compensates for viewport zoom so text stays a consistent
+          screen size — text appears as (fontSize / viewport.scale) px on screen,
+          targeting ~14px regardless of zoom level.
+        */}
+        {showLabels && labelData.map((label, index) => (
+          <Text
+            key={index}
+            text={label.name}
+            x={label.x}
+            y={label.y}
+            anchor={[0.5, 0.5]}
+            style={LABEL_STYLE}
+            // Counter-scale the text so it maintains consistent screen-space size
+            // as the user zooms in. Without this, text would grow with the map.
+            scale={1 / viewport.scale}
+          />
+        ))}
       </Container>
     </>
   )
