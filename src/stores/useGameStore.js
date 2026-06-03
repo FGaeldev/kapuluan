@@ -1,11 +1,16 @@
 /**
  * useGameStore.js
- * 
+ *
  * Purpose: Root game state store. Holds global game metadata —
- *          current year, era, game speed, and pause state.
- * 
+ *          current year, era, game speed, pause state, and game phase.
+ *
+ * Phases:
+ *   'menu'    — Main menu is visible; map renders silently behind it
+ *   'setup'   — Player is picking their starting municipality on the map
+ *   'playing' — Game is active; HUD and panels are live
+ *
  * Usage:   Import and call useGameStore() in any React component.
- * 
+ *
  * Dependencies: zustand, immer (via zustand/middleware)
  */
 
@@ -14,16 +19,27 @@ import { immer } from 'zustand/middleware/immer'
 
 const useGameStore = create(
   immer((set) => ({
-    // ── Game Clock ──────────────────────────────────────────────
-    year: 900,          // Current in-game year (CE)
-    month: 1,           // 1–12
+    // ── Game Phase ───────────────────────────────────────────────
+    phase: 'menu',       // 'menu' | 'setup' | 'playing'
+
+    // ── Game Clock ───────────────────────────────────────────────
+    year: 900,           // Current in-game year (CE)
+    month: 1,            // 1–12
     era: 'pre_colonial', // Active era string key
 
     // ── Playback ─────────────────────────────────────────────────
-    paused: true,       // Game starts paused
-    speed: 1,           // Tick multiplier (1 = normal, 3 = fast)
+    paused: true,        // Game starts paused
+    speed: 1,            // Tick multiplier (1 = normal, 3 = fast)
 
     // ── Actions ──────────────────────────────────────────────────
+
+    /**
+     * Transition to a new game phase.
+     * @param {'menu'|'setup'|'playing'} newPhase
+     */
+    setPhase: (newPhase) => set((state) => {
+      state.phase = newPhase
+    }),
 
     /**
      * Advance game time by one month.
